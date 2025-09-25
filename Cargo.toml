@@ -1,0 +1,17 @@
+[package]
+name = "headless_cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aes-gcm = "0.10"                # AES-256-GCM AEAD
+chacha20poly1305 = "0.10"       # XChaCha20-Poly1305 AEAD
+aead = "0.5"                    # AEAD trait
+hkdf = "0.12"                   # HKDF-SHA512 for key separation
+sha2 = "0.10"                   # SHA2 (used in HKDF)
+rand = "0.8"                    # Random number generator
+base64 = "0.21"                 # Encoding/decoding
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"              # JSON serialization
+zeroize = "1.8"                 # Zeroize keys after use
+argon2 = "0.5"                  # Argon2id KDF
