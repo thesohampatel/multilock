@@ -12,7 +12,7 @@ It uses **Argon2id**, **HKDF-SHA512**, **AES-256-GCM**, and **XChaCha20-Poly1305
 - **Tamper protection** – ciphertext bound to filename & version via AAD.
 - **Zeroization** of sensitive material after use.
 - Cross-platform builds:
-  - ✅ macOS (Apple Silicon / Intel)
+  - ✅ macOS (Apple Silicon)
   - ✅ Linux (musl, static)
 
 ## 📦 Installation
