@@ -18,30 +18,35 @@ It derives keys from the **binary filename** itself, making the executable both 
 
 ## ⚙️ Build Instructions
 
+The project now uses [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) so a single toolchain (Zig) can cross-compile to every supported target without separate linker installs.
+
+```bash
+cargo install cargo-zigbuild   # once
+# make sure zig is on PATH (brew install zig, pkg manager, etc.)
+```
+
 ### macOS (Apple Silicon M1/M2)
 ```bash
-cargo build --release
-ls target/release/multilock
+cargo zigbuild --release --target aarch64-apple-darwin
+ls target/aarch64-apple-darwin/release/multilock
+```
+
+### Windows (x86_64, GNU ABI)
+```bash
+cargo zigbuild --release --target x86_64-pc-windows-gnu
+ls target/x86_64-pc-windows-gnu/release/multilock.exe
 ```
 
 ### Linux x86_64 (musl, static)
 ```bash
-cargo build --release --target x86_64-unknown-linux-musl
+cargo zigbuild --release --target x86_64-unknown-linux-musl
 ls target/x86_64-unknown-linux-musl/release/multilock
 ```
 
-### Raspberry Pi (aarch64-musl, static)
+### Linux aarch64 (musl, static)
 ```bash
-cargo build --release --target aarch64-unknown-linux-musl
+cargo zigbuild --release --target aarch64-unknown-linux-musl
 ls target/aarch64-unknown-linux-musl/release/multilock
-```
-
-> **Note:** requires cross toolchains:
-```bash
-brew tap messense/macos-cross-toolchains
-brew install x86_64-unknown-linux-musl aarch64-unknown-linux-musl
-brew link x86_64-unknown-linux-musl
-brew link aarch64-unknown-linux-musl
 ```
 
 ---
