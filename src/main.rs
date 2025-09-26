@@ -1,3 +1,4 @@
+use clap::{Parser, Subcommand};
 use aes_gcm::{Aes256Gcm, Nonce as AesNonce};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use aead::{Aead, KeyInit, Payload};
@@ -13,6 +14,35 @@ use std::fs;
 use zeroize::Zeroize;
 use argon2::{Argon2, Params};
 use std::io::Read;
+use std::io::Write;
+
+#[derive(Parser)]
+#[command(name = "multilock")]
+#[command(about = "Encrypt or decrypt data bound to executable name", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    Encrypt {
+        data: String,
+        #[arg(short, long)]
+        out: Option<String>,
+        #[arg(long)]
+        pretty: bool,
+    },
+    Decrypt {
+        data: String,
+        #[arg(short, long)]
+        out: Option<String>,
+        #[arg(long)]
+        pretty: bool,
+        #[arg(long)]
+        verify: bool,
+    },
+}
 
 #[derive(Serialize, Deserialize)]
 struct Package {
@@ -173,63 +203,103 @@ fn decrypt(package_json: &str, exe_name: &str) -> Result<Vec<u8>, String> {
     Ok(plain)
 }
 
-fn print_usage(program: &str) {
-    eprintln!("Usage: {} <-e|-d> <data>", program);
-    eprintln!("Options for <data>:");
-    eprintln!("  literal JSON string             (shell quoting required)");
-    eprintln!("  @path/to/file.json              (read JSON from file)");
-    eprintln!("  -                               (read JSON from stdin)");
-    eprintln!("Examples:");
-    eprintln!("  Unix/macOS: {} -d '@data.json'", program);
-    eprintln!("  PowerShell:  .\\{} -d (Get-Content -Raw data.json)", program);
-    eprintln!("  Windows (file): .\\{} -d @data.json", program);
+fn write_output(out: Option<String>, content: &str) -> Result<(), String> {
+    if let Some(path) = out {
+        let tmp_path = format!("{}.tmp", path);
+        {
+            let mut tmp_file = std::fs::File::create(&tmp_path).map_err(|e| format!("failed to create temp file '{}': {}", tmp_path, e))?;
+            tmp_file.write_all(content.as_bytes()).map_err(|e| format!("failed to write to temp file '{}': {}", tmp_path, e))?;
+            tmp_file.flush().map_err(|e| format!("failed to flush temp file '{}': {}", tmp_path, e))?;
+        }
+        std::fs::rename(&tmp_path, &path).map_err(|e| format!("failed to rename temp file to '{}': {}", path, e))?;
+        Ok(())
+    } else {
+        print!("{}", content);
+        Ok(())
+    }
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() != 3 {
-        print_usage(&args[0]);
-        std::process::exit(1);
-    }
+    let cli = Cli::parse();
 
     let exe_name = exe_name_from_current_exe();
-    let op = args[1].as_str();
-    match read_data_arg(&args[2]) {
-        Err(e) => {
-            eprintln!("Error reading data argument: {}", e);
-            std::process::exit(2);
+
+    match cli.command {
+        Commands::Encrypt { data, out, pretty } => {
+            let input = match read_data_arg(&data) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Error reading data argument: {}", e);
+                    std::process::exit(2);
+                }
+            };
+            let encrypted_json = match encrypt(input.as_bytes(), &exe_name) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Encryption failed: {}", e);
+                    std::process::exit(3);
+                }
+            };
+            let output_str = if pretty {
+                match serde_json::to_string_pretty(&serde_json::from_str::<serde_json::Value>(&encrypted_json).unwrap_or_default()) {
+                    Ok(pretty_str) => pretty_str,
+                    Err(e) => {
+                        eprintln!("Failed to pretty print JSON: {}", e);
+                        std::process::exit(5);
+                    }
+                }
+            } else {
+                encrypted_json
+            };
+            if let Err(e) = write_output(out, &output_str) {
+                eprintln!("Failed to write output: {}", e);
+                std::process::exit(6);
+            }
         }
-        Ok(data) => {
-            match op {
-                "-e" => {
-                    match encrypt(data.as_bytes(), &exe_name) {
-                        Ok(out) => {
-                            println!("{}", out);
-                        }
-                        Err(e) => {
-                            eprintln!("Encryption failed: {}", e);
-                            std::process::exit(3);
-                        }
-                    }
+        Commands::Decrypt { data, out, pretty, verify } => {
+            let input = match read_data_arg(&data) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("Error reading data argument: {}", e);
+                    std::process::exit(2);
                 }
-                "-d" => {
-                    match decrypt(&data, &exe_name) {
-                        Ok(plain) => {
-                            if let Ok(s) = str::from_utf8(&plain) {
-                                println!("{}", s);
+            };
+            match decrypt(&input, &exe_name) {
+                Ok(plain) => {
+                    if verify {
+                        // Just print OK if decrypt succeeded
+                        if let Err(e) = write_output(out, "OK\n") {
+                            eprintln!("Failed to write output: {}", e);
+                            std::process::exit(6);
+                        }
+                    } else {
+                        let output_str = if let Ok(s) = str::from_utf8(&plain) {
+                            if pretty {
+                                // Try to pretty print if valid JSON
+                                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(s) {
+                                    match serde_json::to_string_pretty(&json_val) {
+                                        Ok(pretty_str) => pretty_str,
+                                        Err(_) => s.to_string(),
+                                    }
+                                } else {
+                                    s.to_string()
+                                }
                             } else {
-                                println!("{}", general_purpose::STANDARD.encode(&plain));
+                                s.to_string()
                             }
-                        }
-                        Err(e) => {
-                            eprintln!("Decryption failed: {}", e);
-                            std::process::exit(4);
+                        } else {
+                            // base64 encode if not UTF-8
+                            general_purpose::STANDARD.encode(&plain)
+                        };
+                        if let Err(e) = write_output(out, &output_str) {
+                            eprintln!("Failed to write output: {}", e);
+                            std::process::exit(6);
                         }
                     }
                 }
-                _ => {
-                    print_usage(&args[0]);
-                    std::process::exit(1);
+                Err(e) => {
+                    eprintln!("Decryption failed: {}", e);
+                    std::process::exit(4);
                 }
             }
         }
