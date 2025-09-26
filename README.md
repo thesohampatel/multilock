@@ -53,6 +53,19 @@ ls target/aarch64-unknown-linux-musl/release/multilock
 
 ## 🚀 Usage
 
+```
+./multilock <-e|-d> <data>
+```
+
+`<data>` can be supplied three ways:
+
+- literal string/JSON passed directly on the command line (remember to quote)
+- `@path/to/file` to read the entire file
+- `-` to read from `stdin`
+
+Encryption returns a JSON package. Decryption prints UTF-8 plaintext when
+possible, otherwise it base64-encodes the raw bytes for you.
+
 ### Encrypt a string
 ```bash
 ./multilock -e "Hello World"

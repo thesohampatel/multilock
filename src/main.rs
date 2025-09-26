@@ -9,8 +9,10 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::str;
+use std::fs;
 use zeroize::Zeroize;
-use argon2::Argon2;
+use argon2::{Argon2, Params};
+use std::io::Read;
 
 #[derive(Serialize, Deserialize)]
 struct Package {
@@ -31,8 +33,12 @@ fn cleaned_name(exe_name: &str) -> String {
 fn derive_keys_from_name_and_salt(name: &str, salt: &[u8]) -> ([u8; 32], [u8; 32]) {
     let pwd = name.as_bytes();
 
+    // Use Argon2id with moderate params (t=2, m=65536, p=1)
+    let params = Params::new(65536, 2, 1, None).expect("argon params");
+    let argon = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
+
     let mut master = [0u8; 64];
-    Argon2::default()
+    argon
         .hash_password_into(pwd, salt, &mut master)
         .expect("argon2");
 
@@ -61,7 +67,30 @@ fn exe_name_from_current_exe() -> String {
     fname.to_string()
 }
 
-fn encrypt(plain: &[u8], exe_name: &str) -> String {
+/// Read the 'data' argument. Supported forms:
+/// - Leading '@' means read the file after the '@' (e.g. @data.json)
+/// - A single dash "-" means read from stdin
+/// - Otherwise treat as the literal JSON string
+fn read_data_arg(arg: &str) -> Result<String, String> {
+    if arg == "-" {
+        // read entire stdin
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| format!("failed to read stdin: {}", e))?;
+        Ok(buf)
+    } else if let Some(rest) = arg.strip_prefix('@') {
+        fs::read_to_string(rest)
+            .map_err(|e| format!("failed to read file '{}': {}", rest, e))
+    } else if fs::metadata(arg).is_ok() {
+        // If the argument is an existing file path, read it (convenience)
+        fs::read_to_string(arg).map_err(|e| format!("failed to read file '{}': {}", arg, e))
+    } else {
+        Ok(arg.to_string())
+    }
+}
+
+fn encrypt(plain: &[u8], exe_name: &str) -> Result<String, String> {
     let cname = cleaned_name(exe_name);
 
     let mut salt = [0u8; 16];
@@ -69,14 +98,14 @@ fn encrypt(plain: &[u8], exe_name: &str) -> String {
     let (k1, k2) = derive_keys_from_name_and_salt(&cname, &salt);
 
     // Inner AES-256-GCM
-    let aead1 = Aes256Gcm::new_from_slice(&k1).unwrap();
+    let aead1 = Aes256Gcm::new_from_slice(&k1).map_err(|e| format!("AES init: {}", e))?;
     let mut n1 = [0u8; 12];
     OsRng.fill_bytes(&mut n1);
     let nonce1 = AesNonce::from_slice(&n1);
-    let ct1 = aead1.encrypt(nonce1, plain).expect("AES-GCM encrypt");
+    let ct1 = aead1.encrypt(nonce1, plain).map_err(|e| format!("AES encrypt: {}", e))?;
 
     // Outer XChaCha20-Poly1305 with AAD binding to version + cleaned name
-    let aead2 = XChaCha20Poly1305::new_from_slice(&k2).unwrap();
+    let aead2 = XChaCha20Poly1305::new_from_slice(&k2).map_err(|e| format!("XChaCha init: {}", e))?;
     let mut n2 = [0u8; 24];
     OsRng.fill_bytes(&mut n2);
     let aad = format!("v=2|{}", cname);
@@ -88,7 +117,7 @@ fn encrypt(plain: &[u8], exe_name: &str) -> String {
                 aad: aad.as_bytes(),
             },
         )
-        .expect("XChaCha20 encrypt");
+        .map_err(|e| format!("XChaCha encrypt: {}", e))?;
 
     let package = Package {
         v: 2,
@@ -104,21 +133,21 @@ fn encrypt(plain: &[u8], exe_name: &str) -> String {
     k1z.zeroize();
     k2z.zeroize();
 
-    serde_json::to_string(&package).unwrap()
+    serde_json::to_string(&package).map_err(|e| format!("serialize package: {}", e))
 }
 
-fn decrypt(package_json: &str, exe_name: &str) -> Vec<u8> {
-    let pkg: Package = serde_json::from_str(package_json).expect("parse json");
+fn decrypt(package_json: &str, exe_name: &str) -> Result<Vec<u8>, String> {
+    let pkg: Package = serde_json::from_str(package_json).map_err(|e| format!("parse json: {}", e))?;
 
-    let salt = general_purpose::STANDARD.decode(&pkg.s).unwrap();
-    let n1 = general_purpose::STANDARD.decode(&pkg.n1).unwrap();
-    let n2 = general_purpose::STANDARD.decode(&pkg.n2).unwrap();
-    let ct2 = general_purpose::STANDARD.decode(&pkg.ct).unwrap();
+    let salt = general_purpose::STANDARD.decode(&pkg.s).map_err(|e| format!("base64 salt: {}", e))?;
+    let n1 = general_purpose::STANDARD.decode(&pkg.n1).map_err(|e| format!("base64 n1: {}", e))?;
+    let n2 = general_purpose::STANDARD.decode(&pkg.n2).map_err(|e| format!("base64 n2: {}", e))?;
+    let ct2 = general_purpose::STANDARD.decode(&pkg.ct).map_err(|e| format!("base64 ct: {}", e))?;
 
     let cname = cleaned_name(exe_name);
     let (k1, k2) = derive_keys_from_name_and_salt(&cname, &salt);
 
-    let aead2 = XChaCha20Poly1305::new_from_slice(&k2).unwrap();
+    let aead2 = XChaCha20Poly1305::new_from_slice(&k2).map_err(|e| format!("XChaCha init: {}", e))?;
     let aad = format!("v=2|{}", cname);
     let ct1 = aead2
         .decrypt(
@@ -128,46 +157,81 @@ fn decrypt(package_json: &str, exe_name: &str) -> Vec<u8> {
                 aad: aad.as_bytes(),
             },
         )
-        .expect("XChaCha20 decrypt");
+        .map_err(|e| format!("XChaCha decrypt: {}", e))?;
 
-    let aead1 = Aes256Gcm::new_from_slice(&k1).unwrap();
+    let aead1 = Aes256Gcm::new_from_slice(&k1).map_err(|e| format!("AES init: {}", e))?;
     let nonce1 = AesNonce::from_slice(&n1);
     let plain = aead1
         .decrypt(nonce1, ct1.as_ref())
-        .expect("AES-GCM decrypt");
+        .map_err(|e| format!("AES-GCM decrypt: {}", e))?;
 
     let mut k1z = k1;
     let mut k2z = k2;
     k1z.zeroize();
     k2z.zeroize();
 
-    plain
+    Ok(plain)
+}
+
+fn print_usage(program: &str) {
+    eprintln!("Usage: {} <-e|-d> <data>", program);
+    eprintln!("Options for <data>:");
+    eprintln!("  literal JSON string             (shell quoting required)");
+    eprintln!("  @path/to/file.json              (read JSON from file)");
+    eprintln!("  -                               (read JSON from stdin)");
+    eprintln!("Examples:");
+    eprintln!("  Unix/macOS: {} -d '@data.json'", program);
+    eprintln!("  PowerShell:  .\\{} -d (Get-Content -Raw data.json)", program);
+    eprintln!("  Windows (file): .\\{} -d @data.json", program);
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() != 3 {
-        eprintln!("Usage: {} <-e|-d> <data>", args[0]);
+        print_usage(&args[0]);
         std::process::exit(1);
     }
 
     let exe_name = exe_name_from_current_exe();
-    match args[1].as_str() {
-        "-e" => {
-            let out = encrypt(args[2].as_bytes(), &exe_name);
-            println!("{}", out);
+    let op = args[1].as_str();
+    match read_data_arg(&args[2]) {
+        Err(e) => {
+            eprintln!("Error reading data argument: {}", e);
+            std::process::exit(2);
         }
-        "-d" => {
-            let plain = decrypt(&args[2], &exe_name);
-            if let Ok(s) = str::from_utf8(&plain) {
-                println!("{}", s);
-            } else {
-                println!("{}", general_purpose::STANDARD.encode(&plain));
+        Ok(data) => {
+            match op {
+                "-e" => {
+                    match encrypt(data.as_bytes(), &exe_name) {
+                        Ok(out) => {
+                            println!("{}", out);
+                        }
+                        Err(e) => {
+                            eprintln!("Encryption failed: {}", e);
+                            std::process::exit(3);
+                        }
+                    }
+                }
+                "-d" => {
+                    match decrypt(&data, &exe_name) {
+                        Ok(plain) => {
+                            if let Ok(s) = str::from_utf8(&plain) {
+                                println!("{}", s);
+                            } else {
+                                println!("{}", general_purpose::STANDARD.encode(&plain));
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Decryption failed: {}", e);
+                            std::process::exit(4);
+                        }
+                    }
+                }
+                _ => {
+                    print_usage(&args[0]);
+                    std::process::exit(1);
+                }
             }
-        }
-        _ => {
-            eprintln!("Use -e (encrypt) or -d (decrypt)");
-            std::process::exit(1);
         }
     }
 }
