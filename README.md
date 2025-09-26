@@ -54,21 +54,27 @@ ls target/aarch64-unknown-linux-musl/release/multilock
 ## 🚀 Usage
 
 ```
-./multilock <-e|-d> <data>
+multilock <COMMAND> [OPTIONS] <DATA>
 ```
 
-`<data>` can be supplied three ways:
+`<DATA>` can be supplied four ways:
 
 - literal string/JSON passed directly on the command line (remember to quote)
 - `@path/to/file` to read the entire file
 - `-` to read from `stdin`
+- an existing file path (without `@`) as a convenience shortcut
 
-Encryption returns a JSON package. Decryption prints UTF-8 plaintext when
+Encryption always returns a JSON package. Decryption emits UTF-8 plaintext when
 possible, otherwise it base64-encodes the raw bytes for you.
 
-### Encrypt a string
+### Commands
+- `encrypt <DATA>` → encrypts input. Options: `--out <PATH>` to write to a file, `--pretty` to format the JSON output.
+- `decrypt <DATA>` → decrypts a package. Options: `--out <PATH>` to write to a file, `--pretty` to format UTF-8 results, `--verify` to only check decryptability and print `OK`.
+
+### Examples
+#### Encrypt a string
 ```bash
-./multilock -e "Hello World"
+multilock encrypt --pretty '{"msg":"Hello World"}'
 ```
 Output → JSON package:
 ```json
@@ -81,25 +87,37 @@ Output → JSON package:
 }
 ```
 
-### Decrypt a package
+#### Decrypt a package
 ```bash
-./multilock -d '{"v":2,"s":"...","n1":"...","n2":"...","ct":"..."}'
+multilock decrypt '{"v":2,"s":"...","n1":"...","n2":"...","ct":"..."}'
 ```
 Output:
 ```
 Hello World
 ```
 
----
-
-### Encrypt file contents
+#### Verify without printing plaintext
 ```bash
-./multilock -e "$(cat secret.txt)" > encrypted.json
+multilock decrypt --verify @encrypted.json
+```
+Output:
+```
+OK
 ```
 
-### Decrypt file contents
+#### Encrypt file contents
 ```bash
-./multilock -d "$(cat encrypted.json)" > decrypted.txt
+multilock encrypt @secret.txt --out encrypted.json
+```
+
+#### Decrypt file contents
+```bash
+multilock decrypt @encrypted.json --out decrypted.txt
+```
+
+You can also run the tool in-place during development:
+```bash
+cargo run -- encrypt --pretty '{"test":123}'
 ```
 
 ---
@@ -109,9 +127,9 @@ Hello World
 - Example:
   ```bash
   cp target/release/multilock ./securetool
-  ./securetool -e "test"
-  ./multilock -d "<package>"   # ❌ fails
-  ./securetool -d "<package>"  # ✅ works
+  ./securetool encrypt "test"
+  ./multilock decrypt "<package>"   # ❌ fails
+  ./securetool decrypt "<package>"  # ✅ works
   ```
 
 This prevents ciphertext reuse across renamed binaries.
